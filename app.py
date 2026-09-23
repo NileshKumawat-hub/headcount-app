@@ -1,40 +1,52 @@
 import streamlit as st
 import numpy as np
-import mediapipe as mp
-from PIL import Image
+from PIL import Image, ImageOps
+from datetime import datetime, timedelta
+from ultralytics import YOLO
 
 st.set_page_config(page_title="CR Headcount", page_icon="📸", layout="centered")
 
-st.title("📸 CR's Headcount App")
+# Cache the YOLO model so it only loads once and keeps your app fast
+@st.cache_resource
+def load_model():
+    # YOLOv8 nano model is lightweight and auto-downloads the first time it runs
+    return YOLO('yolov8n.pt')
 
-# Sensitivity controls in an expander / sidebar
+model = load_model()
+
+st.title("📸 CR's Crowd Counter (YOLOv8)")
+st.info("For 90+ students, take a high-resolution photo with your native phone camera and use the Upload button instead of the live camera input.")
+
 with st.sidebar:
     st.header("⚙️ Settings")
-    confidence = st.slider("Detection Sensitivity (lower = detects more faces)", 0.10, 0.90, 0.25, 0.05)
+    # YOLO confidence is usually higher than MediaPipe; 0.25 is a good baseline
+    confidence = st.slider("Detection Sensitivity", 0.10, 0.90, 0.25, 0.05)
+    
+    if st.button("Reset Manual Adjustments"):
+        st.session_state.manual_offset = 0
+        st.rerun()
 
-# Session state for manual correction
 if "manual_offset" not in st.session_state:
     st.session_state.manual_offset = 0
 
-photo = st.camera_input("Take a picture of the class")
-uploaded_file = st.file_uploader("Or upload an image", type=["jpg", "jpeg", "png"])
+photo = st.camera_input("Take a picture")
+uploaded_file = st.file_uploader("Upload high-res classroom photo", type=["jpg", "jpeg", "png"])
 
-image_source = photo or uploaded_file
+image_source = uploaded_file or photo
 
 if image_source:
     image = Image.open(image_source)
-    img_array = np.array(image)
-
-    mp_face_detection = mp.solutions.face_detection
-    mp_drawing = mp.solutions.drawing_utils
-
-    with mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=confidence) as face_detection:
-        results = face_detection.process(img_array)
-        detected_count = len(results.detections) if results.detections else 0
-
-        if results.detections:
-            for detection in results.detections:
-                mp_drawing.draw_detection(img_array, detection)
+    image = ImageOps.exif_transpose(image)
+    image = image.convert("RGB")
+    
+    # Run YOLOv8 detection. classes=[0] restricts it to ONLY detect 'persons'
+    results = model.predict(source=image, conf=confidence, classes=[0])
+    
+    # Extract the total count of detected persons
+    detected_count = len(results[0].boxes)
+    
+    # Generate the image with bounding boxes drawn
+    img_with_boxes = results[0].plot()
 
     final_count = max(0, detected_count + st.session_state.manual_offset)
 
@@ -51,5 +63,20 @@ if image_source:
             st.session_state.manual_offset -= 1
             st.rerun()
 
-    st.caption(f"AI detected: {detected_count} | Manual adjustment: {st.session_state.manual_offset:+d}")
-    st.image(img_array, caption="Detection Map", use_container_width=True)
+    st.caption(f"YOLO detected: {detected_count} | Manual adjustment: {st.session_state.manual_offset:+d}")
+    
+    # Show the bounding box image (YOLO outputs BGR, so convert to RGB for Streamlit)
+    st.image(img_with_boxes[..., ::-1], caption="YOLO Detection Map", use_container_width=True)
+
+    ist_time = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    time_str = ist_time.strftime("%Y-%m-%d %I:%M %p")
+    
+    report_text = f"Class Headcount Report\nDate & Time: {time_str}\nTotal Present: {final_count}"
+    
+    st.download_button(
+        label="📥 Download Report",
+        data=report_text,
+        file_name=f"Attendance_{ist_time.strftime('%Y%m%d_%H%M')}.txt",
+        mime="text/plain",
+        use_container_width=True
+    )
