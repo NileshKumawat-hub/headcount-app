@@ -1,26 +1,28 @@
 import streamlit as st
 import numpy as np
+import cv2
 from PIL import Image, ImageOps
 from datetime import datetime, timedelta
 from ultralytics import YOLO
 
 st.set_page_config(page_title="CR Headcount", page_icon="📸", layout="centered")
 
-# Cache the YOLO model so it only loads once and keeps your app fast
 @st.cache_resource
 def load_model():
-    # YOLOv8 nano model is lightweight and auto-downloads the first time it runs
     return YOLO('yolov8n.pt')
 
 model = load_model()
 
 st.title("📸 CR's Crowd Counter (YOLOv8)")
-st.info("For 90+ students, take a high-resolution photo with your native phone camera and use the Upload button instead of the live camera input.")
 
 with st.sidebar:
     st.header("⚙️ Settings")
-    # YOLO confidence is usually higher than MediaPipe; 0.25 is a good baseline
     confidence = st.slider("Detection Sensitivity", 0.10, 0.90, 0.25, 0.05)
+    
+    display_mode = st.radio(
+        "Marker Style:",
+        ["Green Dots", "Numbered Dots", "Clean Boxes (No Text)"]
+    )
     
     if st.button("Reset Manual Adjustments"):
         st.session_state.manual_offset = 0
@@ -39,14 +41,50 @@ if image_source:
     image = ImageOps.exif_transpose(image)
     image = image.convert("RGB")
     
-    # Run YOLOv8 detection. classes=[0] restricts it to ONLY detect 'persons'
+    # Run YOLOv8 detection
     results = model.predict(source=image, conf=confidence, classes=[0])
-    
-    # Extract the total count of detected persons
-    detected_count = len(results[0].boxes)
-    
-    # Generate the image with bounding boxes drawn
-    img_with_boxes = results[0].plot()
+    boxes = results[0].boxes
+    detected_count = len(boxes)
+
+    # Base image for drawing
+    img_display = np.array(image).copy()
+
+    if display_mode == "Clean Boxes (No Text)":
+        # Draw clean boxes without labels or confidence scores
+        annotated_bgr = results[0].plot(labels=False, conf=False)
+        img_display = annotated_bgr[..., ::-1]  # Convert BGR to RGB
+    else:
+        # Draw Green Dots or Numbered Dots
+        for idx, box in enumerate(boxes):
+            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+            
+            # Place the dot near the top center of the person's box (head level)
+            cx = int((x1 + x2) / 2)
+            cy = int(y1 + (y2 - y1) * 0.18)
+
+            # Outer dark ring + vibrant neon green center for high contrast
+            cv2.circle(img_display, (cx, cy), 7, (0, 0, 0), -1)
+            cv2.circle(img_display, (cx, cy), 5, (0, 255, 64), -1)
+
+            if display_mode == "Numbered Dots":
+                cv2.putText(
+                    img_display,
+                    str(idx + 1),
+                    (cx + 8, cy - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (255, 255, 255),
+                    2
+                )
+                cv2.putText(
+                    img_display,
+                    str(idx + 1),
+                    (cx + 8, cy - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 255, 64),
+                    1
+                )
 
     final_count = max(0, detected_count + st.session_state.manual_offset)
 
@@ -64,13 +102,10 @@ if image_source:
             st.rerun()
 
     st.caption(f"YOLO detected: {detected_count} | Manual adjustment: {st.session_state.manual_offset:+d}")
-    
-    # Show the bounding box image (YOLO outputs BGR, so convert to RGB for Streamlit)
-    st.image(img_with_boxes[..., ::-1], caption="YOLO Detection Map", use_container_width=True)
+    st.image(img_display, caption=f"Detection Map ({display_mode})", use_container_width=True)
 
     ist_time = datetime.utcnow() + timedelta(hours=5, minutes=30)
     time_str = ist_time.strftime("%Y-%m-%d %I:%M %p")
-    
     report_text = f"Class Headcount Report\nDate & Time: {time_str}\nTotal Present: {final_count}"
     
     st.download_button(
